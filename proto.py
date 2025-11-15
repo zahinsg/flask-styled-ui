@@ -19,6 +19,7 @@ CORS(app)
 # Global monitor instance and lock for thread-safe access
 monitor = None
 monitor_lock = threading.Lock()
+camera_ready = threading.Event()  # Signal when camera window opens
 
 # --- Configuration ---
 YOLO_OBJ_WEIGHT_PATH = r"C:\Users\User\Desktop\Dot Project\runs\detect\train4\weights\best.pt"
@@ -79,6 +80,7 @@ class YOLOv11MedicationMonitor:
         self.frame_count = 0
         self.should_reset = False
         self.running = True
+        self.camera_opened_once = False  # Track first camera window open
 
         self.obj_model = self._load_yolo_model(self.obj_weights_path, name='Object')
 
@@ -433,6 +435,13 @@ class YOLOv11MedicationMonitor:
             # --- CAMERA DISPLAY ---
             if is_camera_open:
                 cv2.imshow('YOLO Medication Monitor (MediaPipe Jaw Check)', frame)
+                
+                # Signal browser to open ONLY after first successful camera window display
+                if not self.camera_opened_once:
+                    self.camera_opened_once = True
+                    camera_ready.set()
+                    print("✅ Camera window opened - signaling browser to open")
+                
                 if cv2.waitKey(1) & 0xFF == ord('q'):
                     print("\nUser manually quit the protocol.")
                     self.result_status = "USER QUIT"
@@ -526,8 +535,10 @@ def reset_protocol():
 
 
 def open_browser():
-    """Open browser after a short delay"""
-    time.sleep(1.5)
+    """Open browser ONLY after camera window is confirmed open"""
+    print("⏳ Waiting for camera window to open before launching browser...")
+    camera_ready.wait()  # Block until camera window opens
+    time.sleep(0.5)  # Small delay to ensure window is stable
     monitor_url = "https://850180c3-60a2-4930-a17f-4f1427dc94ce.lovableproject.com/monitor"
     print(f"🌐 Opening browser to: {monitor_url}")
     webbrowser.open(monitor_url)
