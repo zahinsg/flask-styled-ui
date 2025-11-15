@@ -81,6 +81,7 @@ class YOLOv11MedicationMonitor:
         self.should_reset = False
         self.running = True
         self.camera_opened_once = False  # Track first camera window open
+        self.window_created = False  # Track cv2 window creation
 
         self.obj_model = self._load_yolo_model(self.obj_weights_path, name='Object')
 
@@ -223,6 +224,18 @@ class YOLOv11MedicationMonitor:
                 self.obj_model = "MOCK"
             else:
                 print("✅ Camera opened successfully")
+                if not self.window_created:
+                    try:
+                        cv2.namedWindow('YOLO Medication Monitor (MediaPipe Jaw Check)', cv2.WINDOW_NORMAL)
+                    except Exception:
+                        pass
+                    init_frame = np.zeros((480, 640, 3), dtype=np.uint8)
+                    cv2.putText(init_frame, "Camera ready. Initializing...", (20, 40), FONT, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
+                    cv2.imshow('YOLO Medication Monitor (MediaPipe Jaw Check)', init_frame)
+                    cv2.waitKey(1)
+                    camera_ready.set()
+                    self.window_created = True
+                    self.camera_opened_once = True
 
             # Reset all session variables
             self.frame_count = 0
