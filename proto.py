@@ -426,14 +426,17 @@ class YOLOv11MedicationMonitor:
                 text = f"Pill: {pill_conf:.2f}"
                 cv2.putText(frame, text, (xyxy[0], xyxy[1] - 5), FONT, 0.6, color, LINE_THICKNESS, cv2.LINE_AA)
 
-            # Store frame for Flask streaming
-            with monitor_lock:
-                self.current_frame = frame.copy()
+                # Store frame for Flask streaming
+                with monitor_lock:
+                    self.current_frame = frame.copy()
 
-            if is_camera_open:
-                cv2.imshow('YOLO Medication Monitor (MediaPipe Jaw Check)', frame)
-                if cv2.waitKey(1) & 0xFF == ord('q'):
-                    print("\nUser manually quit the protocol."); self.result_status = "USER QUIT"; break
+                if is_camera_open:
+                    cv2.imshow('YOLO Medication Monitor (MediaPipe Jaw Check)', frame)
+                    if cv2.waitKey(1) & 0xFF == ord('q'):
+                        print("\nUser manually quit the protocol.")
+                        self.result_status = "USER QUIT"
+                        self.running = False
+                        break
 
                 time.sleep(0.03)
 
