@@ -8,6 +8,9 @@ from flask import Flask, Response, jsonify
 from flask_cors import CORS
 import threading
 import webbrowser
+import json
+from datetime import datetime
+import os
 
 # --- Flask Setup ---
 app = Flask(__name__)
@@ -71,9 +74,11 @@ class YOLOv11MedicationMonitor:
         self.current_phase = 1
         self.pill_history = collections.deque(maxlen=PILL_STATIONARY_FRAMES)
         self.final_confirm_counter = 0
-        self.current_frame = None  # For Flask streaming
-        self.result_status = "INITIALIZING"  # For Flask status endpoint
-        self.should_reset = False  # Flag to trigger protocol restart
+        self.current_frame = None
+        self.result_status = "INITIALIZING"
+        self.frame_count = 0
+        self.should_reset = False
+        self.running = True
 
         self.obj_model = self._load_yolo_model(self.obj_weights_path, name='Object')
 
@@ -164,20 +169,61 @@ class YOLOv11MedicationMonitor:
         cx, cy, _, _ = bbox_info
         return (cx, cy)
 
+    def save_result_to_json(self):
+        """Saves the final protocol status and timestamp to a JSON file in the 'patient_report' directory."""
+        REPORT_DIR = "patient_report"
+
+        if not os.path.exists(REPORT_DIR):
+            try:
+                os.makedirs(REPORT_DIR)
+                print(f"✅ Created directory: {REPORT_DIR}")
+            except OSError as e:
+                print(f"❌ ERROR: Failed to create directory {REPORT_DIR}. Reason: {e}")
+                return
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"adherence_log_{timestamp}.json"
+        full_path = os.path.join(REPORT_DIR, filename)
+
+        data = {
+            "timestamp": timestamp,
+            "final_status": self.result_status,
+            "current_phase_at_end": self.current_phase,
+            "protocol_duration_approx_seconds": self.frame_count * 0.03,
+            "yolo_model_path": self.obj_weights_path,
+        }
+
+        try:
+            with open(full_path, 'w') as f:
+                json.dump(data, f, indent=4)
+            print(f"✅ Protocol result successfully saved to {full_path}")
+        except Exception as e:
+            print(f"❌ ERROR: Could not save JSON file. Reason: {e}")
+
     def run_protocol(self):
-        self.cap = cv2.VideoCapture(self.video_source)
-        is_camera_open = self.cap.isOpened()
-
-        if not is_camera_open:
-            print(f"❌ Error: Could not open video source {self.video_source}. Running in MOCK mode only.")
-            self.obj_model = "MOCK"
-
+        """Main protocol loop that handles camera and session management"""
         print("--- Starting YOLOv11 Adherence Protocol (Continuous Mode) ---")
         
-        # Continuous loop to allow restarts
-        while True:
-            # Reset all variables for new session
-            frame_count = 0
+        # Outer loop keeps monitor alive for multiple sessions
+        while self.running:
+            # Open/reopen camera for new session
+            if self.cap is not None:
+                self.cap.release()
+                print("📷 Releasing previous camera instance")
+                time.sleep(0.5)
+            
+            print("📷 Opening camera...")
+            self.cap = cv2.VideoCapture(self.video_source)
+            is_camera_open = self.cap.isOpened()
+
+            if not is_camera_open:
+                print(f"❌ Error: Could not open video source {self.video_source}. Running in MOCK mode only.")
+                self.obj_model = "MOCK"
+            else:
+                print("✅ Camera opened successfully")
+
+            # Reset all session variables
+            self.frame_count = 0
             self.current_phase = 1
             self.result_status = "RUNNING"
             face_loss_counter = 0
@@ -187,27 +233,32 @@ class YOLOv11MedicationMonitor:
             self.pill_history.clear()
             self.should_reset = False
             
-            print(f"🔄 Starting protocol session (Phase 1)")
+            print(f"🔄 Starting new protocol session (Phase 1)")
 
-            while self.current_phase <= 6 and not self.should_reset:
-            frame_count += 1
-            frame = None
-            if is_camera_open:
-                ret, frame = self.cap.read()
-                if not ret: break
-            if frame is None: frame = np.zeros((480, 640, 3), dtype=np.uint8)
+            # Inner loop runs the actual protocol
+            while self.current_phase <= 6 and not self.should_reset and self.running:
+                self.frame_count += 1
+                frame = None
+                
+                if is_camera_open:
+                    ret, frame = self.cap.read()
+                    if not ret: 
+                        print("❌ Failed to read frame from camera")
+                        break
+                if frame is None: 
+                    frame = np.zeros((480, 640, 3), dtype=np.uint8)
 
-            h, w, _ = frame.shape
-            warning_message = ""
+                h, w, _ = frame.shape
+                warning_message = ""
 
-            detections = self._yolo_detect(frame)
-            vertical_jaw_drop = detections.get('jaw_distance', 0.0)
+                detections = self._yolo_detect(frame)
+                vertical_jaw_drop = detections.get('jaw_distance', 0.0)
 
-            status_text = f"Phase {self.current_phase} (Awaiting Action)"
+                status_text = f"Phase {self.current_phase} (Awaiting Action)"
 
-            face_landmarks_found = detections.get('lip_landmarks') is not None
+                face_landmarks_found = detections.get('lip_landmarks') is not None
 
-            if frame_count > STABILIZATION_FRAMES:
+                if self.frame_count > STABILIZATION_FRAMES:
                 if not face_landmarks_found:
                     face_loss_counter += 1
                     if face_loss_counter >= PILL_STATIONARY_FRAMES:
@@ -217,116 +268,130 @@ class YOLOv11MedicationMonitor:
                 else:
                     face_loss_counter = 0
 
-            prompts = {1: "PHASE 1: Hold medication up.", 2: "PHASE 2: Open mouth WIDE (Check).",
-                       3: "PHASE 3: Place pill on your tongue.", 4: "PHASE 4: Close mouth (Check).",
-                       5: "PHASE 5: Open mouth for check.", 6: "PHASE 6: SWALLOW CHECK..."}
-            prompt_text = prompts.get(self.current_phase, "Protocol Starting...")
-            cv2.putText(frame, prompt_text, (10, 50), FONT, FONT_SCALE, COLOR_PROMPT, LINE_THICKNESS, cv2.LINE_AA)
+                prompts = {
+                    1: "PHASE 1: Hold medication up.", 
+                    2: "PHASE 2: Open mouth WIDE (Check).",
+                    3: "PHASE 3: Place pill on your tongue.", 
+                    4: "PHASE 4: Close mouth (Check).",
+                    5: "PHASE 5: Open mouth for check.", 
+                    6: "PHASE 6: SWALLOW CHECK..."
+                }
+                prompt_text = prompts.get(self.current_phase, "Protocol Starting...")
+                cv2.putText(frame, prompt_text, (10, 50), FONT, FONT_SCALE, COLOR_PROMPT, LINE_THICKNESS, cv2.LINE_AA)
 
-            if self.current_phase == 1:
-                if self._check_detection(detections, 'pill', CPill_P1_MIN):
-                    status_text = "SUCCESS: Pill Detected. Advancing..."; self.current_phase = 2
-                else:
-                    cv2.putText(frame, "Pill NOT Detected!", (10, 90), FONT, FONT_SCALE, COLOR_FAIL, LINE_THICKNESS, cv2.LINE_AA)
+                if self.current_phase == 1:
+                    if self._check_detection(detections, 'pill', CPill_P1_MIN):
+                        status_text = "SUCCESS: Pill Detected. Advancing..."
+                        self.current_phase = 2
+                    else:
+                        cv2.putText(frame, "Pill NOT Detected!", (10, 90), FONT, FONT_SCALE, COLOR_FAIL, LINE_THICKNESS, cv2.LINE_AA)
 
-            elif self.current_phase == 2:
-                tongue_present = self._check_detection(detections, 'tongue-no-pill', CTONGUE_MIN)
-                jaw_open = vertical_jaw_drop > MOUTH_OPEN_THRESHOLD
+                elif self.current_phase == 2:
+                    tongue_present = self._check_detection(detections, 'tongue-no-pill', CTONGUE_MIN)
+                    jaw_open = vertical_jaw_drop > MOUTH_OPEN_THRESHOLD
 
-                if tongue_present and jaw_open:
-                    status_text = "SUCCESS: Mouth Wide Open. Advancing..."; self.current_phase = 3
-                else:
-                    cv2.putText(frame, f"Open mouth WIDER! (Drop: {vertical_jaw_drop:.1f}px)", (10, 90), FONT, FONT_SCALE, COLOR_FAIL, LINE_THICKNESS, cv2.LINE_AA)
+                    if tongue_present and jaw_open:
+                        status_text = "SUCCESS: Mouth Wide Open. Advancing..."
+                        self.current_phase = 3
+                    else:
+                        cv2.putText(frame, f"Open mouth WIDER! (Drop: {vertical_jaw_drop:.1f}px)", (10, 90), FONT, FONT_SCALE, COLOR_FAIL, LINE_THICKNESS, cv2.LINE_AA)
 
-            elif self.current_phase == 3:
-                pill_on_tongue_present = self._check_detection(detections, 'pill-on-tongue', CPill_P3_MIN)
+                elif self.current_phase == 3:
+                    pill_on_tongue_present = self._check_detection(detections, 'pill-on-tongue', CPill_P3_MIN)
 
-                if pill_on_tongue_present:
-                    current_centroid = self._calculate_centroid(detections['pill-on-tongue'][1])
-                    if current_centroid:
-                        self.pill_history.append(current_centroid)
+                    if pill_on_tongue_present:
+                        current_centroid = self._calculate_centroid(detections['pill-on-tongue'][1])
+                        if current_centroid:
+                            self.pill_history.append(current_centroid)
+                        else:
+                            self.pill_history.clear()
+
+                        if len(self.pill_history) >= PILL_STATIONARY_FRAMES:
+                            status_text = "SUCCESS: Pill Stable (Duration Met). Advancing..."
+                            self.current_phase = 4
+                            self.pill_history.clear()
+                        else:
+                            status_text = f"HOLD: {len(self.pill_history)}/{PILL_STATIONARY_FRAMES} frames steady"
                     else:
                         self.pill_history.clear()
+                        cv2.putText(frame, "Place pill on tongue and hold!", (10, 90), FONT, FONT_SCALE, COLOR_FAIL, LINE_THICKNESS, cv2.LINE_AA)
 
-                    if len(self.pill_history) >= PILL_STATIONARY_FRAMES:
-                        status_text = "SUCCESS: Pill Stable (Duration Met). Advancing..."; self.current_phase = 4; self.pill_history.clear()
-                    else:
-                        status_text = f"HOLD: {len(self.pill_history)}/{PILL_STATIONARY_FRAMES} frames steady"
-                else:
-                    self.pill_history.clear()
-                    cv2.putText(frame, "Place pill on tongue and hold!", (10, 90), FONT, FONT_SCALE, COLOR_FAIL, LINE_THICKNESS, cv2.LINE_AA)
+                elif self.current_phase == 4:
+                    tongue_absent_in_frame = self._check_absence(detections, 'tongue-no-pill', CTongue_P4_MAX)
+                    jaw_closed_in_frame = vertical_jaw_drop < MOUTH_CLOSURE_THRESHOLD
+                    pill_on_tongue_conf = detections.get('pill-on-tongue', (0.0, None))[0]
 
-            elif self.current_phase == 4:
-                tongue_absent_in_frame = self._check_absence(detections, 'tongue-no-pill', CTongue_P4_MAX)
-                jaw_closed_in_frame = vertical_jaw_drop < MOUTH_CLOSURE_THRESHOLD
-                pill_on_tongue_conf = detections.get('pill-on-tongue', (0.0, None))[0]
-
-                if phase_4_counter > 0 and (vertical_jaw_drop > MOUTH_OPEN_THRESHOLD) and (pill_on_tongue_conf < CPill_P3_MIN):
-                    print(f"--- ⚠️ PHASE 4 RESET: Mouth opened wide ({vertical_jaw_drop:.1f}) but no pill on tongue detected ({pill_on_tongue_conf:.2f}). ---")
-                    phase_4_counter = 0
-                    warning_message = "MEDICATION MISSING (Resetting P4)"
-
-                if tongue_absent_in_frame and jaw_closed_in_frame:
-                    if phase_4_counter < CONCEALMENT_FRAMES:
-                        phase_4_counter += 1
-                        status_text = f"HOLD CLOSE: {phase_4_counter}/{CONCEALMENT_FRAMES} frames"
-                    else:
-                        status_text = "SUCCESS: Mouth Closed. Advancing..."; self.current_phase = 5; phase_4_counter = 0
-                else:
-                    if phase_4_counter > 0 and not warning_message:
+                    if phase_4_counter > 0 and (vertical_jaw_drop > MOUTH_OPEN_THRESHOLD) and (pill_on_tongue_conf < CPill_P3_MIN):
+                        print(f"--- ⚠️ PHASE 4 RESET: Mouth opened wide ({vertical_jaw_drop:.1f}) but no pill on tongue detected ({pill_on_tongue_conf:.2f}). ---")
                         phase_4_counter = 0
-                        warning_message = "Mouth Opened Too Early!"
+                        warning_message = "MEDICATION MISSING (Resetting P4)"
 
-                    feedback = []
-                    if not tongue_absent_in_frame: feedback.append("Medication Missing!.")
-                    if not jaw_closed_in_frame: feedback.append(f"Jaws not fully closed (Drop: {vertical_jaw_drop:.1f}px).")
-
-                    if not warning_message:
-                        cv2.putText(frame, "Please close your mouth completely!", (10, 90), FONT, 0.7, COLOR_FAIL, LINE_THICKNESS, cv2.LINE_AA)
-                        cv2.putText(frame, f"Failure: {', '.join(feedback)}", (10, 120), FONT, 0.6, COLOR_FAIL, 1, cv2.LINE_AA)
-
-            elif self.current_phase == 5:
-                pill_on_tongue_conf = detections.get('pill-on-tongue', (0.0, None))[0]
-
-                if pill_on_tongue_conf >= CPill_P3_MIN:
-                    print(f"\n--- ❌ FATAL FAILURE: PILL DETECTED ON TONGUE AFTER CONCEALMENT ---")
-                    self.result_status = "FATAL FAILURE (PILL REAPPEARED)"
-                    break
-
-                if self._check_detection(detections, 'tongue-no-pill', CTONGUE_MIN):
-                    status_text = "SUCCESS: Re-opened mouth. Checking swallow..."; self.current_phase = 6
-                else:
-                    cv2.putText(frame, "Open mouth wide again and show tongue!", (10, 90), FONT, 0.7, COLOR_FAIL, LINE_THICKNESS, cv2.LINE_AA)
-
-            elif self.current_phase == 6:
-                tongue_no_pill_confirmed = self._check_detection(detections, 'tongue-no-pill', CTONGUE_MIN)
-                pill_gone = self._check_absence(detections, 'pill', CPill_P6_MAX)
-
-                if tongue_no_pill_confirmed and pill_gone:
-                    final_confirm_counter += 1
-
-                    if final_confirm_counter >= FINAL_CONFIRMATION_FRAMES:
-                        status_text = VERIFIED_PASS
-                        print(f"\n--- 🎉 PROTOCOL COMPLETE! {VERIFIED_PASS} ---"); self.result_status = VERIFIED_PASS; break
+                    if tongue_absent_in_frame and jaw_closed_in_frame:
+                        if phase_4_counter < CONCEALMENT_FRAMES:
+                            phase_4_counter += 1
+                            status_text = f"HOLD CLOSE: {phase_4_counter}/{CONCEALMENT_FRAMES} frames"
+                        else:
+                            status_text = "SUCCESS: Mouth Closed. Advancing..."
+                            self.current_phase = 5
+                            phase_4_counter = 0
                     else:
-                        status_text = f"FINAL CHECK: Hold for {FINAL_CONFIRMATION_FRAMES - final_confirm_counter} more frames."
+                        if phase_4_counter > 0 and not warning_message:
+                            phase_4_counter = 0
+                            warning_message = "Mouth Opened Too Early!"
 
-                else:
-                    final_confirm_counter = 0
-                    status_text = "FAILURE: Pill still visible! SWALLOW NOW!"
+                        feedback = []
+                        if not tongue_absent_in_frame: feedback.append("Medication Missing!.")
+                        if not jaw_closed_in_frame: feedback.append(f"Jaws not fully closed (Drop: {vertical_jaw_drop:.1f}px).")
 
-                    feedback = []
-                    if not tongue_no_pill_confirmed: feedback.append("Mouth must be open")
-                    if not pill_gone: feedback.append("Pill is still detected (SWALLOW!)")
+                        if not warning_message:
+                            cv2.putText(frame, "Please close your mouth completely!", (10, 90), FONT, 0.7, COLOR_FAIL, LINE_THICKNESS, cv2.LINE_AA)
+                            cv2.putText(frame, f"Failure: {', '.join(feedback)}", (10, 120), FONT, 0.6, COLOR_FAIL, 1, cv2.LINE_AA)
 
-                    cv2.putText(frame, status_text, (10, 90), FONT, 0.7, COLOR_FAIL, LINE_THICKNESS, cv2.LINE_AA)
-                    cv2.putText(frame, f"Issue: {', '.join(feedback)}", (10, 120), FONT, 0.6, COLOR_FAIL, 1, cv2.LINE_AA)
+                elif self.current_phase == 5:
+                    pill_on_tongue_conf = detections.get('pill-on-tongue', (0.0, None))[0]
 
-            color_final_status = COLOR_STATUS if status_text.startswith("SUCCESS") or status_text == VERIFIED_PASS else (255, 255, 255)
-            cv2.putText(frame, status_text, (10, frame.shape[0] - 10), FONT, 0.7, color_final_status, LINE_THICKNESS, cv2.LINE_AA)
+                    if pill_on_tongue_conf >= CPill_P3_MIN:
+                        print(f"\n--- ❌ FATAL FAILURE: PILL DETECTED ON TONGUE AFTER CONCEALMENT ---")
+                        self.result_status = "FATAL FAILURE (PILL REAPPEARED)"
+                        break
 
-            if warning_message:
-                cv2.putText(frame, warning_message, (10, 90), FONT, 0.7, COLOR_FAIL, LINE_THICKNESS, cv2.LINE_AA)
+                    if self._check_detection(detections, 'tongue-no-pill', CTONGUE_MIN):
+                        status_text = "SUCCESS: Re-opened mouth. Checking swallow..."
+                        self.current_phase = 6
+                    else:
+                        cv2.putText(frame, "Open mouth wide again and show tongue!", (10, 90), FONT, 0.7, COLOR_FAIL, LINE_THICKNESS, cv2.LINE_AA)
+
+                elif self.current_phase == 6:
+                    tongue_no_pill_confirmed = self._check_detection(detections, 'tongue-no-pill', CTONGUE_MIN)
+                    pill_gone = self._check_absence(detections, 'pill', CPill_P6_MAX)
+
+                    if tongue_no_pill_confirmed and pill_gone:
+                        final_confirm_counter += 1
+
+                        if final_confirm_counter >= FINAL_CONFIRMATION_FRAMES:
+                            status_text = VERIFIED_PASS
+                            print(f"\n--- 🎉 PROTOCOL COMPLETE! {VERIFIED_PASS} ---")
+                            self.result_status = VERIFIED_PASS
+                            break
+                        else:
+                            status_text = f"FINAL CHECK: Hold for {FINAL_CONFIRMATION_FRAMES - final_confirm_counter} more frames."
+
+                    else:
+                        final_confirm_counter = 0
+                        status_text = "FAILURE: Pill still visible! SWALLOW NOW!"
+
+                        feedback = []
+                        if not tongue_no_pill_confirmed: feedback.append("Mouth must be open")
+                        if not pill_gone: feedback.append("Pill is still detected (SWALLOW!)")
+
+                        cv2.putText(frame, status_text, (10, 90), FONT, 0.7, COLOR_FAIL, LINE_THICKNESS, cv2.LINE_AA)
+                        cv2.putText(frame, f"Issue: {', '.join(feedback)}", (10, 120), FONT, 0.6, COLOR_FAIL, 1, cv2.LINE_AA)
+
+                color_final_status = COLOR_STATUS if status_text.startswith("SUCCESS") or status_text == VERIFIED_PASS else (255, 255, 255)
+                cv2.putText(frame, status_text, (10, frame.shape[0] - 10), FONT, 0.7, color_final_status, LINE_THICKNESS, cv2.LINE_AA)
+
+                if warning_message:
+                    cv2.putText(frame, warning_message, (10, 90), FONT, 0.7, COLOR_FAIL, LINE_THICKNESS, cv2.LINE_AA)
 
             if detections.get('lip_landmarks'):
                 landmarks = detections['lip_landmarks']
