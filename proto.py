@@ -89,6 +89,41 @@ class YOLOv11MedicationMonitor:
         )
         self.cap = None
 
+    def _open_camera(self):
+        """Try multiple camera indices and backends; return (cap, is_open)."""
+        try_indices = []
+        # Ensure primary video_source is first
+        try:
+            primary = int(self.video_source)
+            try_indices.append(primary)
+        except Exception:
+            try_indices.append(0)
+        for i in range(0, 4):
+            if i not in try_indices:
+                try_indices.append(i)
+        backends = []
+        # Prefer platform backends if available
+        if hasattr(cv2, 'CAP_DSHOW'):
+            backends.append(cv2.CAP_DSHOW)
+        if hasattr(cv2, 'CAP_MSMF'):
+            backends.append(cv2.CAP_MSMF)
+        backends.append(None)  # default
+
+        for idx in try_indices:
+            for backend in backends:
+                try:
+                    cap = cv2.VideoCapture(idx) if backend is None else cv2.VideoCapture(idx, backend)
+                    if cap is not None and cap.isOpened():
+                        print(f"✅ Camera opened on index {idx} (backend={backend})")
+                        self.video_source = idx
+                        return cap, True
+                    if cap:
+                        cap.release()
+                except Exception as e:
+                    print(f"⚠️ Camera open failed on index {idx} backend={backend}: {e}")
+        print("❌ Could not open any camera index 0-3.")
+        return None, False
+
     def _load_yolo_model(self, weights_path, name):
         try:
             print(f"Loading {name} Model from: {weights_path}...")
@@ -213,8 +248,7 @@ class YOLOv11MedicationMonitor:
                 time.sleep(0.5)
             
             print("📷 Opening camera...")
-            self.cap = cv2.VideoCapture(self.video_source)
-            is_camera_open = self.cap.isOpened()
+            self.cap, is_camera_open = self._open_camera()
 
             if not is_camera_open:
                 print(f"❌ Error: Could not open video source {self.video_source}. Running in MOCK mode only.")
