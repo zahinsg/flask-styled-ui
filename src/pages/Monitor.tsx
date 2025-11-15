@@ -22,18 +22,16 @@ const Monitor = () => {
     // Poll backend for status updates
     const pollStatus = async () => {
       try {
-        const response = await fetch(`${backendUrl}/status_update`, {
-          signal: AbortSignal.timeout(1000) // 1 second timeout
-        });
+        const response = await fetch(`${backendUrl}/status_update`);
         if (!response.ok) throw new Error('Backend not responding');
         
         const data = await response.json();
         
-        // Connection stability check - require 3 consecutive successes
+        // Connection stability check - require 2 consecutive successes
         connectionStableCount.current++;
         disconnectionCount.current = 0;
         
-        if (!isConnected && connectionStableCount.current >= 3) {
+        if (!isConnected && connectionStableCount.current >= 2) {
           setIsConnected(true);
           if (!hasShownConnectedToast.current) {
             toast({
@@ -46,24 +44,32 @@ const Monitor = () => {
         }
         
         setProtocolStatus(data.result_status || "RUNNING");
-        setCurrentPhase(data.current_phase || "Monitoring...");
         
-        // Extract phase number from phase string
-        const phaseMatch = data.current_phase?.match(/Phase (\d+)/);
-        if (phaseMatch) {
-          setPhaseCount(parseInt(phaseMatch[1]));
+        // Handle phase - can be either number or string
+        const phase = data.current_phase;
+        if (typeof phase === 'number') {
+          setPhaseCount(phase);
+          setCurrentPhase(`Phase ${phase}`);
+        } else if (typeof phase === 'string') {
+          setCurrentPhase(phase);
+          const phaseMatch = phase.match(/Phase (\d+)/);
+          if (phaseMatch) {
+            setPhaseCount(parseInt(phaseMatch[1]));
+          }
+        } else {
+          setCurrentPhase("Monitoring...");
         }
       } catch (error) {
-        // Disconnection stability check - require 5 consecutive failures
+        // Disconnection stability check - require 3 consecutive failures
         disconnectionCount.current++;
         connectionStableCount.current = 0;
         
-        if (isConnected && disconnectionCount.current >= 5) {
+        if (isConnected && disconnectionCount.current >= 3) {
           setIsConnected(false);
           if (!hasShownDisconnectedToast.current) {
             toast({
               title: "Connection Lost",
-              description: "Make sure Flask backend is running on port 5000",
+              description: "Reconnecting to Flask backend...",
               variant: "destructive",
             });
             hasShownDisconnectedToast.current = true;
