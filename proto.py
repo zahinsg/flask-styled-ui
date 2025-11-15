@@ -417,6 +417,23 @@ def status_update():
             })
 
 
+@app.route('/reset', methods=['POST'])
+def reset_protocol():
+    """Reset the protocol to start over"""
+    global monitor
+    with monitor_lock:
+        if monitor:
+            # Reset all state variables
+            monitor.current_phase = 1
+            monitor.result_status = "RUNNING"
+            monitor.pill_history.clear()
+            monitor.final_confirm_counter = 0
+            print("🔄 Protocol reset by user")
+            return jsonify({"status": "success", "message": "Protocol reset"})
+        else:
+            return jsonify({"status": "error", "message": "Monitor not initialized"}), 500
+
+
 def open_browser():
     """Open browser after a short delay"""
     time.sleep(1.5)
