@@ -435,19 +435,24 @@ class YOLOv11MedicationMonitor:
                 if cv2.waitKey(1) & 0xFF == ord('q'):
                     print("\nUser manually quit the protocol."); self.result_status = "USER QUIT"; break
 
-            time.sleep(0.03)
-            
-            # Check if reset was requested
-            if self.should_reset:
-                print("🔄 Reset requested, restarting protocol...")
-                break
+                time.sleep(0.03)
 
-        # If protocol ended naturally, wait for reset
-        if not self.should_reset:
-            print(f"\n--- PROTOCOL SESSION ENDED: {self.result_status} ---")
-            print("Waiting for reset to start new session...")
-            while not self.should_reset:
-                time.sleep(0.1)
+            # Session ended - save results
+            self.save_result_to_json()
+            print(f"\n--- SESSION ENDED: {self.result_status} ---")
+            
+            # If should_reset is True, loop continues for new session
+            # Otherwise, wait for reset signal
+            if not self.should_reset and self.running:
+                print("⏸️  Waiting for new session request...")
+                while not self.should_reset and self.running:
+                    time.sleep(0.1)
+
+        # Cleanup
+        if self.cap:
+            self.cap.release()
+        cv2.destroyAllWindows()
+        print("--- PROTOCOL MONITOR STOPPED ---")
 
 
 # --- Flask Routes ---
