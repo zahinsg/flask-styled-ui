@@ -73,6 +73,7 @@ class YOLOv11MedicationMonitor:
         self.final_confirm_counter = 0
         self.current_frame = None  # For Flask streaming
         self.result_status = "INITIALIZING"  # For Flask status endpoint
+        self.should_reset = False  # Flag to trigger protocol restart
 
         self.obj_model = self._load_yolo_model(self.obj_weights_path, name='Object')
 
@@ -171,15 +172,24 @@ class YOLOv11MedicationMonitor:
             print(f"❌ Error: Could not open video source {self.video_source}. Running in MOCK mode only.")
             self.obj_model = "MOCK"
 
-        frame_count = 0
-        print("--- Starting YOLOv11 Adherence Protocol (Sequential Check) ---")
-        self.result_status = "RUNNING"
-        face_loss_counter = 0
-        final_confirm_counter = 0
-        phase_4_counter = 0
-        warning_message = ""
+        print("--- Starting YOLOv11 Adherence Protocol (Continuous Mode) ---")
+        
+        # Continuous loop to allow restarts
+        while True:
+            # Reset all variables for new session
+            frame_count = 0
+            self.current_phase = 1
+            self.result_status = "RUNNING"
+            face_loss_counter = 0
+            final_confirm_counter = 0
+            phase_4_counter = 0
+            warning_message = ""
+            self.pill_history.clear()
+            self.should_reset = False
+            
+            print(f"🔄 Starting protocol session (Phase 1)")
 
-        while self.current_phase <= 6:
+            while self.current_phase <= 6 and not self.should_reset:
             frame_count += 1
             frame = None
             if is_camera_open:
@@ -361,10 +371,18 @@ class YOLOv11MedicationMonitor:
                     print("\nUser manually quit the protocol."); self.result_status = "USER QUIT"; break
 
             time.sleep(0.03)
+            
+            # Check if reset was requested
+            if self.should_reset:
+                print("🔄 Reset requested, restarting protocol...")
+                break
 
-        if self.cap: self.cap.release(); cv2.destroyAllWindows()
-        print(f"\n--- PROTOCOL ENDED ---")
-        return self.result_status
+        # If protocol ended naturally, wait for reset
+        if not self.should_reset:
+            print(f"\n--- PROTOCOL SESSION ENDED: {self.result_status} ---")
+            print("Waiting for reset to start new session...")
+            while not self.should_reset:
+                time.sleep(0.1)
 
 
 # --- Flask Routes ---
@@ -423,13 +441,10 @@ def reset_protocol():
     global monitor
     with monitor_lock:
         if monitor:
-            # Reset all state variables
-            monitor.current_phase = 1
-            monitor.result_status = "RUNNING"
-            monitor.pill_history.clear()
-            monitor.final_confirm_counter = 0
-            print("🔄 Protocol reset by user")
-            return jsonify({"status": "success", "message": "Protocol reset"})
+            # Set reset flag to trigger protocol restart
+            monitor.should_reset = True
+            print("🔄 Protocol reset requested by user")
+            return jsonify({"status": "success", "message": "Protocol reset initiated"})
         else:
             return jsonify({"status": "error", "message": "Monitor not initialized"}), 500
 
