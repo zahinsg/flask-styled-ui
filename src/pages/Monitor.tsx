@@ -1,6 +1,6 @@
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import { AlertCircle, CheckCircle2, Loader2, Wifi, WifiOff } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 
@@ -11,22 +11,38 @@ const Monitor = () => {
   const [isConnected, setIsConnected] = useState(false);
   const [backendUrl] = useState("http://localhost:5000");
   const { toast } = useToast();
+  
+  // Use refs to track connection state without causing re-renders
+  const connectionStableCount = useRef(0);
+  const disconnectionCount = useRef(0);
+  const hasShownConnectedToast = useRef(false);
+  const hasShownDisconnectedToast = useRef(false);
 
   useEffect(() => {
     // Poll backend for status updates
     const pollStatus = async () => {
       try {
-        const response = await fetch(`${backendUrl}/status_update`);
+        const response = await fetch(`${backendUrl}/status_update`, {
+          signal: AbortSignal.timeout(1000) // 1 second timeout
+        });
         if (!response.ok) throw new Error('Backend not responding');
         
         const data = await response.json();
         
-        if (!isConnected) {
+        // Connection stability check - require 3 consecutive successes
+        connectionStableCount.current++;
+        disconnectionCount.current = 0;
+        
+        if (!isConnected && connectionStableCount.current >= 3) {
           setIsConnected(true);
-          toast({
-            title: "Connected to Flask Backend",
-            description: "Live monitoring active",
-          });
+          if (!hasShownConnectedToast.current) {
+            toast({
+              title: "Connected to Flask Backend",
+              description: "Live monitoring active",
+            });
+            hasShownConnectedToast.current = true;
+            hasShownDisconnectedToast.current = false;
+          }
         }
         
         setProtocolStatus(data.result_status || "RUNNING");
@@ -38,16 +54,24 @@ const Monitor = () => {
           setPhaseCount(parseInt(phaseMatch[1]));
         }
       } catch (error) {
-        if (isConnected) {
+        // Disconnection stability check - require 5 consecutive failures
+        disconnectionCount.current++;
+        connectionStableCount.current = 0;
+        
+        if (isConnected && disconnectionCount.current >= 5) {
           setIsConnected(false);
-          toast({
-            title: "Connection Lost",
-            description: "Make sure Flask backend is running on port 5000",
-            variant: "destructive",
-          });
+          if (!hasShownDisconnectedToast.current) {
+            toast({
+              title: "Connection Lost",
+              description: "Make sure Flask backend is running on port 5000",
+              variant: "destructive",
+            });
+            hasShownDisconnectedToast.current = true;
+            hasShownConnectedToast.current = false;
+          }
+          setProtocolStatus("DISCONNECTED");
+          setCurrentPhase("Backend not connected");
         }
-        setProtocolStatus("DISCONNECTED");
-        setCurrentPhase("Backend not connected");
       }
     };
 
@@ -58,7 +82,7 @@ const Monitor = () => {
     const interval = setInterval(pollStatus, 500);
 
     return () => clearInterval(interval);
-  }, [isConnected, backendUrl, toast]);
+  }, [backendUrl, toast]);
 
   const getStatusColor = () => {
     if (protocolStatus.includes("PASS") || protocolStatus.includes("VERIFIED")) return "bg-success";
