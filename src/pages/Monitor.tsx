@@ -1,54 +1,76 @@
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { useEffect, useState } from "react";
-import { AlertCircle, CheckCircle2, Loader2 } from "lucide-react";
+import { AlertCircle, CheckCircle2, Loader2, Wifi, WifiOff } from "lucide-react";
+import { useToast } from "@/hooks/use-toast";
 
 const Monitor = () => {
-  const [protocolStatus, setProtocolStatus] = useState("RUNNING");
-  const [currentPhase, setCurrentPhase] = useState("Phase 1: Initial Detection");
-  const [phaseCount, setPhaseCount] = useState(1);
+  const [protocolStatus, setProtocolStatus] = useState("CONNECTING");
+  const [currentPhase, setCurrentPhase] = useState("Waiting for connection...");
+  const [phaseCount, setPhaseCount] = useState(0);
+  const [isConnected, setIsConnected] = useState(false);
+  const [backendUrl] = useState("http://localhost:5000");
+  const { toast } = useToast();
 
   useEffect(() => {
-    // Simulate protocol progression
-    const interval = setInterval(() => {
-      setPhaseCount((prev) => {
-        const next = prev >= 6 ? 1 : prev + 1;
+    // Poll backend for status updates
+    const pollStatus = async () => {
+      try {
+        const response = await fetch(`${backendUrl}/status_update`);
+        if (!response.ok) throw new Error('Backend not responding');
         
-        const phases = [
-          "Phase 1: Initial Detection",
-          "Phase 2: Hand Movement",
-          "Phase 3: Pill on Tongue",
-          "Phase 4: Concealment Check",
-          "Phase 5: Mouth Closure",
-          "Phase 6: Final Verification"
-        ];
+        const data = await response.json();
         
-        setCurrentPhase(phases[next - 1]);
-        
-        if (next === 6) {
-          setTimeout(() => {
-            setProtocolStatus("VERIFIED (PASS)");
-          }, 2000);
-        } else if (next === 1) {
-          setProtocolStatus("RUNNING");
+        if (!isConnected) {
+          setIsConnected(true);
+          toast({
+            title: "Connected to Flask Backend",
+            description: "Live monitoring active",
+          });
         }
         
-        return next;
-      });
-    }, 3000);
+        setProtocolStatus(data.result_status || "RUNNING");
+        setCurrentPhase(data.current_phase || "Monitoring...");
+        
+        // Extract phase number from phase string
+        const phaseMatch = data.current_phase?.match(/Phase (\d+)/);
+        if (phaseMatch) {
+          setPhaseCount(parseInt(phaseMatch[1]));
+        }
+      } catch (error) {
+        if (isConnected) {
+          setIsConnected(false);
+          toast({
+            title: "Connection Lost",
+            description: "Make sure Flask backend is running on port 5000",
+            variant: "destructive",
+          });
+        }
+        setProtocolStatus("DISCONNECTED");
+        setCurrentPhase("Backend not connected");
+      }
+    };
+
+    // Initial connection
+    pollStatus();
+    
+    // Poll every 500ms for real-time updates
+    const interval = setInterval(pollStatus, 500);
 
     return () => clearInterval(interval);
-  }, []);
+  }, [isConnected, backendUrl, toast]);
 
   const getStatusColor = () => {
-    if (protocolStatus === "VERIFIED (PASS)") return "bg-success";
-    if (protocolStatus === "FAIL") return "bg-destructive";
+    if (protocolStatus.includes("PASS") || protocolStatus.includes("VERIFIED")) return "bg-success";
+    if (protocolStatus.includes("FAIL") || protocolStatus.includes("FATAL")) return "bg-destructive";
+    if (protocolStatus === "DISCONNECTED") return "bg-muted";
     return "bg-warning";
   };
 
   const getStatusIcon = () => {
-    if (protocolStatus === "VERIFIED (PASS)") return <CheckCircle2 className="w-5 h-5" />;
-    if (protocolStatus === "FAIL") return <AlertCircle className="w-5 h-5" />;
+    if (protocolStatus.includes("PASS") || protocolStatus.includes("VERIFIED")) return <CheckCircle2 className="w-5 h-5" />;
+    if (protocolStatus.includes("FAIL") || protocolStatus.includes("FATAL")) return <AlertCircle className="w-5 h-5" />;
+    if (protocolStatus === "DISCONNECTED") return <WifiOff className="w-5 h-5" />;
     return <Loader2 className="w-5 h-5 animate-spin" />;
   };
 
@@ -61,13 +83,33 @@ const Monitor = () => {
         </div>
 
         <Card className="p-6 shadow-elevated mb-6">
-          <div className="aspect-video bg-muted rounded-lg flex items-center justify-center border-4 border-border overflow-hidden">
-            <div className="text-center p-8">
-              <div className="w-24 h-24 mx-auto mb-4 rounded-full bg-primary/10 flex items-center justify-center">
-                <Activity className="w-12 h-12 text-primary animate-pulse" />
+          <div className="relative aspect-video bg-muted rounded-lg flex items-center justify-center border-4 border-border overflow-hidden">
+            {isConnected ? (
+              <img 
+                src={`${backendUrl}/video_feed`}
+                alt="Live Video Feed"
+                className="w-full h-full object-contain"
+                onError={() => {
+                  console.error("Video feed error");
+                }}
+              />
+            ) : (
+              <div className="text-center p-8">
+                <div className="w-24 h-24 mx-auto mb-4 rounded-full bg-primary/10 flex items-center justify-center">
+                  <WifiOff className="w-12 h-12 text-muted-foreground animate-pulse" />
+                </div>
+                <p className="text-muted-foreground mb-2">Waiting for Flask Backend</p>
+                <p className="text-xs text-muted-foreground">Run: python proto.py</p>
+                <p className="text-xs text-muted-foreground mt-1">Backend URL: {backendUrl}</p>
               </div>
-              <p className="text-muted-foreground mb-2">Live Video Feed</p>
-              <p className="text-xs text-muted-foreground">Connect to Flask backend at /video_feed for live stream</p>
+            )}
+            
+            {/* Connection Status Badge */}
+            <div className="absolute top-3 right-3">
+              <Badge variant={isConnected ? "default" : "secondary"} className="flex items-center gap-1">
+                {isConnected ? <Wifi className="w-3 h-3" /> : <WifiOff className="w-3 h-3" />}
+                {isConnected ? "Connected" : "Offline"}
+              </Badge>
             </div>
           </div>
         </Card>
