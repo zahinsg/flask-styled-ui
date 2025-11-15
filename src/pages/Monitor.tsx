@@ -94,6 +94,12 @@ const Monitor = () => {
 
   const handleReset = async () => {
     setIsResetting(true);
+    
+    // Immediately reset local state for better UX
+    setProtocolStatus("RUNNING");
+    setPhaseCount(1);
+    setCurrentPhase("Phase 1");
+    
     try {
       const response = await fetch(`${backendUrl}/reset`, {
         method: 'POST',
@@ -102,10 +108,14 @@ const Monitor = () => {
       if (response.ok) {
         toast({
           title: "Protocol Reset",
-          description: "Starting new session...",
+          description: "Starting new session with camera...",
         });
-        setPhaseCount(0);
-        setCurrentPhase("Waiting for connection...");
+        
+        // Reset connection counters after a brief delay to allow camera to restart
+        setTimeout(() => {
+          connectionStableCount.current = 0;
+          disconnectionCount.current = 0;
+        }, 1000);
       } else {
         throw new Error('Reset failed');
       }
@@ -115,6 +125,8 @@ const Monitor = () => {
         description: "Could not reset protocol. Please refresh the page.",
         variant: "destructive",
       });
+      setProtocolStatus("DISCONNECTED");
+      setCurrentPhase("Backend not connected");
     } finally {
       setIsResetting(false);
     }
