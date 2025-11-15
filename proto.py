@@ -466,6 +466,7 @@ def index():
 
 def generate_frames():
     """Generator function for video streaming"""
+    global monitor
     while True:
         with monitor_lock:
             if monitor and monitor.current_frame is not None:
@@ -495,6 +496,7 @@ def video_feed():
 
 @app.route('/status_update')
 def status_update():
+    global monitor
     with monitor_lock:
         if monitor:
             return jsonify({
