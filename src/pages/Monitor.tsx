@@ -1,5 +1,6 @@
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { useEffect, useState, useRef } from "react";
 import { AlertCircle, CheckCircle2, Loader2, Wifi, WifiOff } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
@@ -10,6 +11,7 @@ const Monitor = () => {
   const [phaseCount, setPhaseCount] = useState(0);
   const [isConnected, setIsConnected] = useState(false);
   const [backendUrl] = useState("http://localhost:5000");
+  const [isResetting, setIsResetting] = useState(false);
   const { toast } = useToast();
   
   // Use refs to track connection state without causing re-renders
@@ -90,6 +92,39 @@ const Monitor = () => {
     return () => clearInterval(interval);
   }, [backendUrl, toast]);
 
+  const handleReset = async () => {
+    setIsResetting(true);
+    try {
+      const response = await fetch(`${backendUrl}/reset`, {
+        method: 'POST',
+      });
+      
+      if (response.ok) {
+        toast({
+          title: "Protocol Reset",
+          description: "Starting new session...",
+        });
+        setPhaseCount(0);
+        setCurrentPhase("Waiting for connection...");
+      } else {
+        throw new Error('Reset failed');
+      }
+    } catch (error) {
+      toast({
+        title: "Reset Failed",
+        description: "Could not reset protocol. Please refresh the page.",
+        variant: "destructive",
+      });
+    } finally {
+      setIsResetting(false);
+    }
+  };
+
+  const isSessionTerminated = 
+    protocolStatus.includes("PASS") || 
+    protocolStatus.includes("FAIL") || 
+    protocolStatus.includes("QUIT");
+
   const getStatusColor = () => {
     if (protocolStatus.includes("PASS") || protocolStatus.includes("VERIFIED")) return "bg-success";
     if (protocolStatus.includes("FAIL") || protocolStatus.includes("FATAL")) return "bg-destructive";
@@ -154,6 +189,20 @@ const Monitor = () => {
               Live
             </Badge>
           </div>
+          
+          {isSessionTerminated && (
+            <div className="mt-4 flex justify-center">
+              <Button 
+                onClick={handleReset}
+                disabled={isResetting || !isConnected}
+                size="lg"
+                className="w-full sm:w-auto"
+              >
+                {isResetting ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : null}
+                {isResetting ? "Resetting..." : "Start New Session"}
+              </Button>
+            </div>
+          )}
         </Card>
 
         <Card className="p-6 shadow-card">
